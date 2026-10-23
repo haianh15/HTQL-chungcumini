@@ -466,7 +466,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [contracts, setContracts] = useState<Contract[]>(() => getStored('contracts', INITIAL_CONTRACTS));
   const [settlementSlips, setSettlementSlips] = useState<DepositSettlementSlip[]>(() => getStored('settlementSlips', INITIAL_SETTLEMENT_SLIPS));
 
-  const [meterReadings, setMeterReadings] = useState<MeterReading[]>(() => getStored('meterReadings', INITIAL_METER_READINGS));
+  const [meterReadings, setMeterReadings] = useState<MeterReading[]>(() => getStored('meterReadings', INITIAL_METER_READINGS).map(m => ({...m, status: m.status === 'Nháp – điều chỉnh' ? 'Nháp' as const : m.status})));
   const [periodBills, setPeriodBills] = useState<PeriodBill[]>(() => getStored('periodBills', INITIAL_PERIOD_BILLS));
   const [reconciliations, setReconciliations] = useState<ReceivableReconciliation[]>(() => getStored('reconciliations', []));
   const [paymentNotices, setPaymentNotices] = useState<PaymentNotice[]>(() => getStored('paymentNotices', INITIAL_PAYMENT_NOTICES));
@@ -4238,11 +4238,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const nextWater = updates.finalWaterM3 ?? reading.finalWaterM3;
     if (!Number.isFinite(nextElec) || !Number.isFinite(nextWater) || nextElec < 0 || nextWater < 0)
       return {success: false, message: 'Chỉ số cuối phải là số hợp lệ và không âm.'};
-    if ((nextElec < reading.initialElectricKwh && (updates.verifiedElectricKwh === undefined || !updates.abnormalEvidence?.trim())) ||
-        (nextWater < reading.initialWaterM3 && (updates.verifiedWaterM3 === undefined || !updates.abnormalEvidence?.trim())))
-      return {success:false,message:'Chỉ số cuối thấp hơn đầu kỳ phải có sản lượng thực tế xác minh và chứng cứ.'};
+    if (!updates.pendingVerificationFlag && ((nextElec < reading.initialElectricKwh &&
+      (updates.verifiedElectricKwh === undefined || !(updates.evidenceFiles?.length))) ||
+      (nextWater < reading.initialWaterM3 && (updates.verifiedWaterM3 === undefined || !(updates.evidenceFiles?.length)))))
+      return {success:false,message:'Chỉ số cuối thấp hơn đầu kỳ phải có sản lượng xác minh và tệp chứng cứ, hoặc lưu Nháp – Cần xác minh.'};
     setMeterReadings(prev => prev.map(m => m.id === readingId ? {
-      ...m, ...updates, status: 'Nháp – điều chỉnh', needsRecalculateFlag: periodBills.some(b => b.roomCode === m.roomCode && b.leaseId === m.leaseId && b.periodCode === m.periodCode)
+      ...m, ...updates, status: 'Nháp', needsRecalculateFlag: periodBills.some(b => b.roomCode === m.roomCode && b.leaseId === m.leaseId && b.periodCode === m.periodCode)
     } : m));
     logSecurity('METER_READING_UPDATED_TT02', `Reading ${readingId} updated: ${reason.trim()}`);
     return {success: true, message: 'Đã ghi nhận điều chỉnh chỉ số; cần kiểm tra lại trước khi tính tiền.'};

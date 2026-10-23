@@ -112,8 +112,13 @@ export function validateMeterReadingSave(args: {
     reading.abnormalReason !== 'Thay công tơ')
     return { success: false, message: 'Mã công tơ nước khác hồ sơ nguồn. Hãy kiểm tra; nếu thay công tơ, ghi rõ lý do và chứng cứ.' };
   if ((hasElec && reading.finalElectricKwh < baseline.electric) || (hasWater && reading.finalWaterM3 < baseline.water)) {
-    if (!reading.pendingVerificationFlag && !reading.abnormalEvidence?.trim())
-      return { success: false, message: 'Chỉ số cuối thấp hơn đầu kỳ phải được đánh dấu Cần xác minh hoặc có chứng cứ xác minh.' };
+    if (!reading.pendingVerificationFlag && (
+      !reading.evidenceFiles?.length ||
+      (hasElec && reading.finalElectricKwh < baseline.electric &&
+        (reading.verifiedElectricKwh === undefined || !Number.isFinite(reading.verifiedElectricKwh))) ||
+      (hasWater && reading.finalWaterM3 < baseline.water &&
+        (reading.verifiedWaterM3 === undefined || !Number.isFinite(reading.verifiedWaterM3)))))
+      return { success: false, message: 'Chỉ số cuối thấp hơn đầu kỳ phải lưu Nháp – Cần xác minh hoặc có sản lượng đã xác minh kèm tệp chứng cứ thực tế.' };
   }
   return { success: true, message: 'Đã lưu chỉ số cho đúng phòng, lần thuê và kỳ; chỉ số đầu đã được đối chiếu với hồ sơ nguồn.' };
 }

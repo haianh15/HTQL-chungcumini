@@ -806,6 +806,13 @@ export interface DepositSettlementSlip {
 }
 
 // ==================== QUY TRÌNH 06: TÍNH TIỀN THEO KỲ ====================
+export interface MeterEvidenceAttachment {
+  name: string;
+  mimeType: string;
+  size: number;
+  dataUrl: string; // tệp thật trong bộ nhớ trình duyệt của prototype
+}
+
 export interface MeterReading {
   id: string;
   roomCode: string;
@@ -827,7 +834,10 @@ export interface MeterReading {
   abnormalReason?: 'Nhập sai' | 'Quay vòng' | 'Thay công tơ' | 'Công tơ hỏng' | 'Khác';
   verifiedElectricKwh?: number; // Sản lượng sử dụng thực tế đã xác minh
   verifiedWaterM3?: number;
-  abnormalEvidence?: string;
+  abnormalEvidence?: string; // dữ liệu mô tả cũ, KHÔNG coi là tệp thực tế
+  evidenceFiles?: MeterEvidenceAttachment[];
+  pendingElectricVerificationFlag?: boolean;
+  pendingWaterVerificationFlag?: boolean;
   status: 'Nháp' | 'Nháp – điều chỉnh' | 'Đã xác nhận';
   pendingVerificationFlag: boolean; // Cờ Chờ xác minh
   needsRecalculateFlag: boolean; // Cờ Cần tính lại

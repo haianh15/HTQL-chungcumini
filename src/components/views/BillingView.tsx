@@ -2,13 +2,36 @@ import { toUserMessage } from '../../utils/userMessages';
 import React, { useState, useMemo } from 'react';
 import { useApp } from '../../context/AppContext';
 import { resolveMeterBaseline } from '../../utils/meterReadings';
-import { MeterReading, PeriodBill, Room } from '../../types';
+import { MeterReading, MeterEvidenceAttachment, PeriodBill, Room } from '../../types';
 import {
   Zap, Droplets, Plus, CheckCircle2, AlertCircle, Edit, Calculator,
   Calendar, ArrowRight, ShieldAlert, History, FileText, CheckSquare, X,
   AlertTriangle, Filter, Search, Image as ImageIcon, Camera, RefreshCw,
   ExternalLink, Layers, ArrowDownRight, Eye
 } from 'lucide-react';
+
+/** Prototype: tệp được lưu thành Data URL trong dữ liệu cục bộ để có thể xem lại sau khi tải trang. */
+const EVIDENCE_MAX_FILES = 3;
+const EVIDENCE_MAX_TOTAL = 1_800_000;
+const EVIDENCE_MAX_EACH = 900_000;
+const EVIDENCE_ALLOWED = ['image/jpeg','image/png','image/webp','application/pdf'];
+async function readMeterEvidenceFiles(input: FileList | null, existing: MeterEvidenceAttachment[]): Promise<MeterEvidenceAttachment[]> {
+  if (!input?.length) return existing;
+  const files = Array.from(input);
+  if (existing.length + files.length > EVIDENCE_MAX_FILES) throw new Error('Tối đa 3 tệp chứng cứ cho một lần xác minh.');
+  const currentBytes = existing.reduce((s, f) => s + f.size, 0);
+  if (currentBytes + files.reduce((s,f)=>s+f.size,0) > EVIDENCE_MAX_TOTAL) throw new Error('Tổng dung lượng chứng cứ tối đa 1,8 MB do prototype dùng bộ nhớ trình duyệt.');
+  if (files.some(f => !EVIDENCE_ALLOWED.includes(f.type) || f.size > EVIDENCE_MAX_EACH || f.size === 0))
+    throw new Error('Chỉ nhận JPG, PNG, WEBP, PDF; mỗi tệp phải có dung lượng từ 1 byte đến 900 KB.');
+  const mapped = await Promise.all(files.map(file => new Promise<MeterEvidenceAttachment>((resolve,reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error('Không thể đọc tệp chứng cứ.'));
+    reader.onload = () => resolve({name:file.name, mimeType:file.type, size:file.size, dataUrl:String(reader.result)});
+    reader.readAsDataURL(file);
+  })));
+  return [...existing, ...mapped];
+}
+const evidenceLabel = (meter: MeterReading) => meter.pendingElectricVerificationFlag && meter.pendingWaterVerificationFlag ? 'Điện và nước' : meter.pendingElectricVerificationFlag ? 'Điện' : meter.pendingWaterVerificationFlag ? 'Nước' : 'Điện/nước';
 
 interface BillingViewProps {
   onNavigateToNotices?: (billId?: string, noticeId?: string) => void;
@@ -33,7 +56,8 @@ export const BillingView: React.FC<BillingViewProps> = ({ onNavigateToNotices })
 
   // Filter for room list in UC-TT-01 (Điều kiện trước 2: Đang thuê, Sắp trả, hoặc Đã trả nhưng chưa chốt kỳ cuối)
   const [roomFilterTab, setRoomFilterTab] = useState<'ALL' | 'RENTING' | 'EXPIRING' | 'RETURNED_PENDING'>('ALL');
-  const [readingStatusFilter, setReadingStatusFilter] = useState<'ALL' | 'RECORDED' | 'VERIFY'>('ALL');
+  const [readingStatusFilter, setReadingStatusFilter] = useState<'ALL' | 'DRAFT' | 'CONFIRMED'>('ALL');
+  const [verificationFilter, setVerificationFilter] = useState<'ALL' | 'PENDING' | 'VERIFIED' | 'NONE'>('ALL');
   const [searchTerm, setSearchTerm] = useState('');
 
   // UC-TT-01 Reading Modal State
@@ -57,7 +81,9 @@ export const BillingView: React.FC<BillingViewProps> = ({ onNavigateToNotices })
   const [abnormalReason, setAbnormalReason] = useState<'Nhập sai' | 'Quay vòng' | 'Thay công tơ' | 'Công tơ hỏng' | 'Khác'>('Khác');
   const [verifiedElec, setVerifiedElec] = useState<number | ''>('');
   const [verifiedWater, setVerifiedWater] = useState<number | ''>('');
-  const [abnormalProof, setAbnormalProof] = useState('');
+  const [abnormalProof, setAbnormalProof] = useState(''); // Lý do/chứng cứ văn bản kế thừa
+  const [readingEvidenceFiles, setReadingEvidenceFiles] = useState<MeterEvidenceAttachment[]>([]);
+  const [deferredVerification, setDeferredVerification] = useState(false);
   const [abnormalNotes, setAbnormalNotes] = useState('');
   const [abnormalMeter, setAbnormalMeter] = useState<'electric'|'water'|'both'>('electric');
   const [verifiedCheckbox, setVerifiedCheckbox] = useState(false);
@@ -73,7 +99,8 @@ export const BillingView: React.FC<BillingViewProps> = ({ onNavigateToNotices })
   const [editFinalElec, setEditFinalElec] = useState(0);
   const [editFinalWater, setEditFinalWater] = useState(0);
   const [editReason, setEditReason] = useState('');
-  const [editProof, setEditProof] = useState('');
+  const [editProof, setEditProof] = useState(''); // Chứng cứ văn bản của dữ liệu cũ (chỉ đọc)
+  const [editEvidenceFiles, setEditEvidenceFiles] = useState<MeterEvidenceAttachment[]>([]);
   const [editVerifiedElec, setEditVerifiedElec] = useState<number | ''>('');
   const [editVerifiedWater, setEditVerifiedWater] = useState<number | ''>('');
   const [editVerificationAccepted, setEditVerificationAccepted] = useState(false);
@@ -113,8 +140,11 @@ export const BillingView: React.FC<BillingViewProps> = ({ onNavigateToNotices })
   const availableReadingRooms = useMemo(() => eligibleRooms.filter(room => {
     if (!room.currentLeaseId || !(['Đang thuê','Sắp trả'].includes(room.status) || room.isReturnedPending)) return false;
     const reading = meterReadings.find(r => r.roomCode === room.roomCode && r.leaseId === room.currentLeaseId && r.periodCode.trim() === readPeriod.trim());
-    return !reading || (reading.status === 'Nháp' && (reading.electricRecorded === false || reading.waterRecorded === false));
-  }), [eligibleRooms, meterReadings, readPeriod]);
+    // Dữ liệu bảng tính có sẵn cũng được tính: không nhầm 'chưa ghi' với 'đã có kết quả tính tiền'.
+    const billed = periodBills.some(b => b.roomCode === room.roomCode && b.leaseId === room.currentLeaseId && b.periodCode.trim() === readPeriod.trim());
+    if (billed) return false;
+    return !reading || (reading.status !== 'Đã xác nhận' && (reading.electricRecorded === false || reading.waterRecorded === false));
+  }), [eligibleRooms, meterReadings, periodBills, readPeriod]);
 
   const selectedExistingReading = meterReadings.find(r => r.id === editingDraftReadingId);
   const electricLocked = Boolean(selectedExistingReading && selectedExistingReading.electricRecorded !== false);
@@ -139,11 +169,14 @@ export const BillingView: React.FC<BillingViewProps> = ({ onNavigateToNotices })
     if (roomFilterTab === 'RENTING' && room?.status !== 'Đang thuê') return false;
     if (roomFilterTab === 'EXPIRING' && room?.status !== 'Sắp trả') return false;
     if (roomFilterTab === 'RETURNED_PENDING' && !(room?.status === 'Trống' && room.currentLeaseId)) return false;
-    if (readingStatusFilter === 'VERIFY' && !m.pendingVerificationFlag) return false;
-    if (readingStatusFilter === 'RECORDED' && m.pendingVerificationFlag) return false;
+    if (readingStatusFilter === 'DRAFT' && m.status === 'Đã xác nhận') return false;
+    if (readingStatusFilter === 'CONFIRMED' && m.status !== 'Đã xác nhận') return false;
+    if (verificationFilter === 'PENDING' && !m.pendingVerificationFlag) return false;
+    if (verificationFilter === 'VERIFIED' && (m.pendingVerificationFlag || !m.isAbnormal)) return false;
+    if (verificationFilter === 'NONE' && (m.isAbnormal || m.pendingVerificationFlag)) return false;
     if (searchTerm && !m.roomCode.toLowerCase().includes(searchTerm.toLowerCase())) return false;
     return true;
-  }), [meterReadings, rooms, roomFilterTab, readingStatusFilter, searchTerm]);
+  }), [meterReadings, rooms, roomFilterTab, readingStatusFilter, verificationFilter, searchTerm]);
 
   // Hiện đủ phòng/lượt thuê của kỳ, kể cả phòng chưa có chỉ số; khóa checkbox và nêu lý do.
   const billCandidateReadings = useMemo(() => eligibleRooms.filter(room =>
@@ -205,7 +238,7 @@ export const BillingView: React.FC<BillingViewProps> = ({ onNavigateToNotices })
   const handleSelectRoomForReading = (roomCode: string) => {
     setReadRoom(roomCode); setReadingDateError(null); setReadingSavePhase('entry');
     setVerifiedCheckbox(false); setAbnormalNotes(''); setIsAbnormal(false);
-    setVerifiedElec(''); setVerifiedWater(''); setAbnormalProof('');
+    setVerifiedElec(''); setVerifiedWater(''); setAbnormalProof(''); setReadingEvidenceFiles([]);setDeferredVerification(false);
     setEditingDraftReadingId(null);
     setInitElec(''); setFinalElec(''); setInitWater(''); setFinalWater(''); setElecMeterCode(''); setWaterMeterCode('');
     if (!roomCode) return;
@@ -215,7 +248,7 @@ export const BillingView: React.FC<BillingViewProps> = ({ onNavigateToNotices })
     if (draft) {
       setIsAbnormal(Boolean(draft.isAbnormal));setAbnormalReason(draft.abnormalReason || 'Khác');
       setVerifiedElec(draft.verifiedElectricKwh ?? '');setVerifiedWater(draft.verifiedWaterM3 ?? '');
-      setAbnormalProof(draft.abnormalEvidence || '');
+      setAbnormalProof(draft.abnormalEvidence || '');setReadingEvidenceFiles(draft.evidenceFiles || []);setDeferredVerification(Boolean(draft.pendingVerificationFlag));
       setEditingDraftReadingId(draft.id); setReadType(draft.readingType);setReadingDate(draft.readingDate);
       setInitElec(draft.initialElectricKwh); setFinalElec(draft.electricRecorded === false ? '' : draft.finalElectricKwh);
       setInitWater(draft.initialWaterM3); setFinalWater(draft.waterRecorded === false ? '' : draft.finalWaterM3);
@@ -236,7 +269,7 @@ export const BillingView: React.FC<BillingViewProps> = ({ onNavigateToNotices })
     setElecMeterCode(reading.electricMeterCode);setWaterMeterCode(reading.waterMeterCode);
     setIsAbnormal(Boolean(reading.isAbnormal));setAbnormalReason(reading.abnormalReason || 'Khác');
     setVerifiedElec(reading.verifiedElectricKwh ?? '');setVerifiedWater(reading.verifiedWaterM3 ?? '');
-    setAbnormalProof(reading.abnormalEvidence || '');setReadingDateError(null);
+    setAbnormalProof(reading.abnormalEvidence || '');setReadingEvidenceFiles(reading.evidenceFiles || []);setDeferredVerification(Boolean(reading.pendingVerificationFlag));setReadingDateError(null);
     setReadingSavePhase('entry');setVerifiedCheckbox(false);setAbnormalNotes('');
     setReadingStage(1);setShowReadingModal(true);
   };
@@ -249,12 +282,15 @@ export const BillingView: React.FC<BillingViewProps> = ({ onNavigateToNotices })
   const structuralElecAbnormal = hasElectric && (currentElecUsage < 0 || (isAbnormal && abnormalReason !== 'Khác' && (abnormalMeter === 'electric' || abnormalMeter === 'both')));
   const structuralWaterAbnormal = hasWater && (currentWaterUsage < 0 || (isAbnormal && abnormalReason !== 'Khác' && (abnormalMeter === 'water' || abnormalMeter === 'both')));
 
-  const commitReading = (verifiedAbnormal: boolean) => {
+  const commitReading = (verificationMode: 'normal'|'verified'|'pending') => {
     const room = rooms.find(r=>r.roomCode===readRoom);
     const draft = editingDraftReadingId ? meterReadings.find(r=>r.id===editingDraftReadingId) : undefined;
     const leaseId = draft?.leaseId || room?.currentLeaseId;
     if (!leaseId || !selectedMeterBaseline?.ok) {setReadingDateError('Không xác định được chỉ số đầu kỳ và lần thuê hợp lệ.');return;}
-    const hasAbnormal = verifiedAbnormal && (isAbnormal || detectedAbnormal);
+    const hasAbnormal = isAbnormal || detectedAbnormal || Boolean(draft?.isAbnormal);
+    const pending = hasAbnormal && (verificationMode === 'pending' || (verificationMode === 'normal' && (deferredVerification || Boolean(draft?.pendingVerificationFlag))));
+    const affectedElectric = Boolean(autoElecAbnormal || (isAbnormal && (abnormalMeter === 'electric' || abnormalMeter === 'both')) || draft?.pendingElectricVerificationFlag);
+    const affectedWater = Boolean(autoWaterAbnormal || (isAbnormal && (abnormalMeter === 'water' || abnormalMeter === 'both')) || draft?.pendingWaterVerificationFlag);
     const reading:MeterReading = {
       id:draft?.id || `mr_${readRoom}_${Date.now()}`,roomCode:readRoom,leaseId,
       periodCode:readPeriod.trim(),readingType:readType,readingDate:draft?.readingDate || readingDate,
@@ -266,16 +302,18 @@ export const BillingView: React.FC<BillingViewProps> = ({ onNavigateToNotices })
       verifiedElectricKwh:hasAbnormal && verifiedElec!==''?Number(verifiedElec):undefined,
       verifiedWaterM3:hasAbnormal && verifiedWater!==''?Number(verifiedWater):undefined,
       abnormalEvidence:hasAbnormal ? [abnormalNotes.trim(),abnormalProof.trim()].filter(Boolean).join(' | ') :undefined,
-      status:'Nháp',pendingVerificationFlag:hasAbnormal &&
-        ((structuralElecAbnormal && (verifiedElec==='' || !abnormalProof.trim())) ||
-         (structuralWaterAbnormal && (verifiedWater==='' || !abnormalProof.trim()))),
+      evidenceFiles:hasAbnormal ? readingEvidenceFiles : undefined,
+      pendingElectricVerificationFlag:pending && affectedElectric, pendingWaterVerificationFlag:pending && affectedWater,
+      status:'Nháp',pendingVerificationFlag:pending,
       needsRecalculateFlag:false,isFinalPeriodForLease:draft?.isFinalPeriodForLease ?? (room?.status==='Trống')
     };
     const result=saveMeterReadingTT01(reading);
     if(!result.success) {setReadingDateError(result.message);setReadingSavePhase('entry');return;}
     setShowReadingModal(false);setEditingDraftReadingId(null);setReadingSavePhase('entry');
-    alert(!hasElectric || !hasWater ? `Đã lưu nháp ${readRoom}. ${!hasElectric?'Còn thiếu điện.':'Còn thiếu nước.'}`:
-      reading.pendingVerificationFlag?'Đã lưu nháp, còn chờ xác minh.':'Đã ghi nhận đủ chỉ số thành công.');
+    alert(!hasElectric || !hasWater
+      ? `Đã lưu Nháp ${readRoom}. ${!hasElectric?'Còn thiếu điện.':'Còn thiếu nước.'}${reading.pendingVerificationFlag ? ' Đồng thời có cờ Cần xác minh.' : ''}`
+      : reading.pendingVerificationFlag ? 'Đã lưu Nháp và gắn cờ Cần xác minh. Có thể xác minh sau tại Sửa/Xác minh.'
+      : 'Đã lưu Nháp đầy đủ chỉ số thành công.');
   };
 
   // Bấm Lưu mới kiểm tra; hỏi lưu dở SAU khi đã xử lý lỗi và bất thường.
@@ -291,22 +329,42 @@ export const BillingView: React.FC<BillingViewProps> = ({ onNavigateToNotices })
     }
     if(isAbnormal || detectedAbnormal) {setReadingSavePhase('warning');return;}
     if(!hasElectric || !hasWater) {setReadingSavePhase('partial');return;}
-    commitReading(false);
+    commitReading('normal');
   };
 
   const handleContinueAfterAbnormal = () => {
     if(!verifiedCheckbox || !abnormalNotes.trim()) {setReadingDateError('Cần tích xác nhận đã kiểm tra và nhập lý do bất thường.');return;}
     if ((structuralElecAbnormal && (verifiedElec==='' || Number(verifiedElec)<0)) ||
         (structuralWaterAbnormal && (verifiedWater==='' || Number(verifiedWater)<0)) ||
-        ((structuralElecAbnormal || structuralWaterAbnormal) && !abnormalProof.trim())) {
+        ((structuralElecAbnormal || structuralWaterAbnormal) && readingEvidenceFiles.length===0)) {
       setReadingDateError('Công tơ hỏng/quay vòng/thay hoặc chỉ số cuối nhỏ hơn đầu: cần nhập sản lượng đã xác minh và chứng cứ cho công tơ liên quan.');return;
     }
     setReadingDateError(null);
-    if(!hasElectric || !hasWater) setReadingSavePhase('partial'); else commitReading(true);
+    setDeferredVerification(false);
+    if(!hasElectric || !hasWater) setReadingSavePhase('partial'); else commitReading('verified');
+  };
+
+  const handleDeferVerification = () => {
+    setDeferredVerification(true);
+    setReadingDateError(null);
+    if (!hasElectric || !hasWater) setReadingSavePhase('partial');
+    else commitReading('pending');
+  };
+
+  const addEvidence = async (files: FileList | null, target: 'entry'|'edit') => {
+    try {
+      if (target === 'entry') setReadingEvidenceFiles(await readMeterEvidenceFiles(files, readingEvidenceFiles));
+      else setEditEvidenceFiles(await readMeterEvidenceFiles(files, editEvidenceFiles));
+      setReadingDateError(null);
+    } catch (e) {
+      const message = e instanceof Error ? e.message : 'Tệp không hợp lệ.';
+      if (target === 'entry') setReadingDateError(message);
+      else alert(message);
+    }
   };
 
   // TT-02: Sửa chỉ số đã có, kèm xác minh khi có bất thường.
-  const handleUpdateReading = (e: React.FormEvent) => {
+  const handleUpdateReading = (e: React.FormEvent, deferVerification = false) => {
     e.preventDefault();
     if (!selectedReading || !editReason.trim()) {alert('Bắt buộc nhập lý do sửa chỉ số.');return;}
     const unusualElec=editFinalElec < selectedReading.initialElectricKwh || editFinalElec===selectedReading.initialElectricKwh ||
@@ -316,19 +374,22 @@ export const BillingView: React.FC<BillingViewProps> = ({ onNavigateToNotices })
     const abnormal=Boolean(unusualElec || unusualWater || selectedReading.pendingVerificationFlag);
     const structuralElec=editFinalElec < selectedReading.initialElectricKwh;
     const structuralWater=editFinalWater < selectedReading.initialWaterM3;
-    if (abnormal && !editVerificationAccepted) {alert('Chỉ số bất thường: cần xác nhận đã kiểm tra trước khi lưu.');return;}
-    if ((structuralElec && (editVerifiedElec==='' || !editProof.trim())) ||
-      (structuralWater && (editVerifiedWater==='' || !editProof.trim()))) {
+    if (abnormal && !deferVerification && !editVerificationAccepted) {alert('Chỉ số bất thường: hãy xác minh hoặc chọn Lưu Nháp – Cần xác minh.');return;}
+    if (!deferVerification && ((structuralElec && (editVerifiedElec==='' || editEvidenceFiles.length===0)) ||
+      (structuralWater && (editVerifiedWater==='' || editEvidenceFiles.length===0)))) {
       alert('Chỉ số cuối nhỏ hơn đầu kỳ: yêu cầu sản lượng thực tế đã xác minh và chứng cứ.');return;
     }
     const result=updateMeterReadingTT02(selectedReading.id,{
       finalElectricKwh:editFinalElec,finalWaterM3:editFinalWater,
       isAbnormal:abnormal,
-      pendingVerificationFlag:abnormal ? !editVerificationAccepted : false,
+      pendingVerificationFlag:abnormal ? (deferVerification || !editVerificationAccepted) : false,
+      pendingElectricVerificationFlag:abnormal && (deferVerification || !editVerificationAccepted) && (unusualElec || Boolean(selectedReading.pendingElectricVerificationFlag)),
+      pendingWaterVerificationFlag:abnormal && (deferVerification || !editVerificationAccepted) && (unusualWater || Boolean(selectedReading.pendingWaterVerificationFlag)),
       abnormalReason:abnormal?(selectedReading.abnormalReason || 'Khác'):undefined,
       abnormalEvidence:abnormal ? [editReason.trim(), editProof.trim()].filter(Boolean).join(' | '):undefined,
-      verifiedElectricKwh:structuralElec?Number(editVerifiedElec):undefined,
-      verifiedWaterM3:structuralWater?Number(editVerifiedWater):undefined
+      evidenceFiles:abnormal ? editEvidenceFiles : undefined,
+      verifiedElectricKwh:!deferVerification && structuralElec?Number(editVerifiedElec):undefined,
+      verifiedWaterM3:!deferVerification && structuralWater?Number(editVerifiedWater):undefined
     },editReason.trim());
     if(!result.success) {alert(result.message);return;}
     setShowEditModal(false);alert('Đã sửa/xác minh chỉ số. Có thể kiểm tra điều kiện và tính lại tại TT-03.');
@@ -427,7 +488,7 @@ export const BillingView: React.FC<BillingViewProps> = ({ onNavigateToNotices })
                   setAbnormalReason('Quay vòng');
                   setVerifiedElec('');
                   setVerifiedWater('');
-                  setAbnormalProof('');
+                  setAbnormalProof('');setReadingEvidenceFiles([]);setDeferredVerification(false);
                   setAbnormalNotes('');setVerifiedCheckbox(false);setReadingSavePhase('entry');
                   setReadingDateError(null);
                   setReadingStage(0);
@@ -468,8 +529,8 @@ export const BillingView: React.FC<BillingViewProps> = ({ onNavigateToNotices })
               <span className="text-xs font-semibold text-slate-500 mr-1">Trạng thái chỉ số:</span>
               {[
                 { id: 'ALL', label: 'Tất cả' },
-                { id: 'RECORDED', label: 'Đã ghi nhận' },
-                { id: 'VERIFY', label: 'Cần xác minh' }
+                { id: 'DRAFT', label: 'Nháp' },
+                { id: 'CONFIRMED', label: 'Đã xác nhận' }
               ].map(tab => (
                 <button
                   key={tab.id}
@@ -478,6 +539,18 @@ export const BillingView: React.FC<BillingViewProps> = ({ onNavigateToNotices })
                   className={`px-3 py-1 rounded-lg text-xs font-medium cursor-pointer transition-colors ${readingStatusFilter === tab.id ? 'bg-blue-100 text-blue-800 font-bold' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}
                 >{tab.label}</button>
               ))}
+            </div>
+
+            <div className="flex flex-wrap items-center gap-1.5">
+              <span className="text-xs font-semibold text-slate-500 mr-1">Xác minh:</span>
+              {[
+                { id: 'ALL', label: 'Tất cả' },
+                { id: 'PENDING', label: 'Cần xác minh' },
+                { id: 'VERIFIED', label: 'Đã xác minh' },
+                { id: 'NONE', label: 'Không cần xác minh' }
+              ].map(tab => <button key={tab.id} type="button" onClick={()=>setVerificationFilter(tab.id as any)}
+                className={`px-3 py-1 rounded-lg text-xs font-medium ${verificationFilter===tab.id?'bg-blue-100 text-blue-800 font-bold':'bg-slate-100 text-slate-600'}`}>
+                {tab.label}</button>)}
             </div>
 
             <div className="relative w-full sm:w-56">
@@ -492,6 +565,12 @@ export const BillingView: React.FC<BillingViewProps> = ({ onNavigateToNotices })
             </div>
           </div>
 
+          {/* Kỳ có bảng tính nguồn nhưng không có hồ sơ chỉ số gốc: không bịa số đọc. */}
+          {periodBills.some(b=>b.isConfirmed && !meterReadings.some(r=>r.roomCode===b.roomCode && r.leaseId===b.leaseId && r.periodCode.trim()===b.periodCode.trim())) &&
+            <div className="rounded-xl bg-slate-50 border border-slate-200 p-3 text-xs text-slate-600">
+              Các kỳ đã có bảng tính từ dữ liệu mẫu được nhận diện là <strong>đã tính tiền</strong> và không xuất hiện trong danh sách ghi chỉ số mới.
+              Nếu thiếu hồ sơ công tơ gốc, chỉ xem dữ liệu đã tính tại tab <strong>Bảng tính kỳ</strong>; hệ thống không tự sinh chỉ số đầu/cuối giả.
+            </div>}
           {/* Meter Readings Table */}
           <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
             <div className="p-3.5 border-b border-slate-100 flex items-center justify-between">
@@ -504,11 +583,11 @@ export const BillingView: React.FC<BillingViewProps> = ({ onNavigateToNotices })
 
               <div className="flex items-center gap-3 text-[11px] text-slate-500">
                 <span className="flex items-center gap-1">
-                  <span className="w-2 h-2 rounded-full bg-emerald-500"></span> Đã xác nhận (qua tính tiền) </span>
+                  <span className="w-2 h-2 rounded-full bg-emerald-500"></span> Đã xác nhận </span>
                 <span className="flex items-center gap-1">
-                  <span className="w-2 h-2 rounded-full bg-amber-500"></span> Đã ghi nhận </span>
+                  <span className="w-2 h-2 rounded-full bg-amber-500"></span> Nháp </span>
                 <span className="flex items-center gap-1">
-                  <span className="w-2 h-2 rounded-full bg-red-500"></span> Cần xác minh </span>
+                  <span className="w-2 h-2 rounded-full bg-red-500"></span> Cần xác minh (cờ riêng) </span>
               </div>
             </div>
 
@@ -566,7 +645,10 @@ export const BillingView: React.FC<BillingViewProps> = ({ onNavigateToNotices })
                           {m.isAbnormal ? (
                             <div className="space-y-1">
                               <span className="inline-block px-2 py-0.5 rounded text-[10px] font-bold bg-amber-100 text-amber-900 border border-amber-200">
-                                ⚠ {m.abnormalReason} (Xác minh: {m.verifiedElectricKwh} kWh) </span>
+                                ⚠ {m.abnormalReason || 'Bất thường'} {m.pendingVerificationFlag ? `– Cần xác minh ${evidenceLabel(m)}` : '– Đã xử lý'} </span>
+                              {m.verifiedElectricKwh !== undefined && <span className="block text-[10px] text-slate-600">Điện xác minh: {m.verifiedElectricKwh} kWh</span>}
+                              {m.verifiedWaterM3 !== undefined && <span className="block text-[10px] text-slate-600">Nước xác minh: {m.verifiedWaterM3} m³</span>}
+                              {m.evidenceFiles?.map((f,i) => <a key={i} href={f.dataUrl} download={f.name} target="_blank" rel="noreferrer" className="block text-[10px] text-blue-700 underline">📎 {f.name}</a>)}
                               {m.abnormalEvidence && (
                                 <span className="block text-[10px] text-slate-500 truncate max-w-xs" title={m.abnormalEvidence}>
                                   📎 {m.abnormalEvidence}
@@ -578,19 +660,15 @@ export const BillingView: React.FC<BillingViewProps> = ({ onNavigateToNotices })
                           )}
                         </td>
                         <td className="py-3 px-3">
-                          {m.electricRecorded===false || m.waterRecorded===false ? (
-                            <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-100 text-amber-800 block text-center">Thiếu {m.electricRecorded===false?'điện':'nước'}</span>
-                          ) : m.pendingVerificationFlag ? (
-                            <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-red-100 text-red-800 border border-red-200 block text-center">
-                              Cần xác minh </span>
-                          ): m.status === 'Đã xác nhận' ? (
-                            <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-100 text-emerald-800 block text-center">
-                              Đã xác nhận </span>
-                          ): (
-                            <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-100 text-amber-800 block text-center">
-                              {m.status === 'Nháp' ? 'Đã ghi nhận' : m.status}
+                          <div className="space-y-1">
+                            <span className={`px-2 py-0.5 rounded text-[10px] font-bold block text-center ${m.status === 'Đã xác nhận' ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100 text-amber-800'}`}>
+                              {m.status === 'Đã xác nhận' ? 'Đã xác nhận' : 'Nháp'}
                             </span>
-                          )}
+                            {(m.electricRecorded === false || m.waterRecorded === false) &&
+                              <span className="block text-[10px] text-amber-800 text-center">Thiếu {m.electricRecorded === false ? 'điện' : 'nước'}</span>}
+                            {m.pendingVerificationFlag && <span className="block text-center text-[10px] font-bold text-red-700">Cần xác minh</span>}
+                            {m.needsRecalculateFlag && <span className="block text-center text-[10px] text-amber-800">Cần tính lại</span>}
+                          </div>
                         </td>
                         <td className="py-3 px-3 text-right">
                           <div className="flex items-center justify-end gap-1.5">
@@ -601,7 +679,7 @@ export const BillingView: React.FC<BillingViewProps> = ({ onNavigateToNotices })
                             >
                               <Eye className="w-3.5 h-3.5" />
                             </button>
-                            {m.status === 'Nháp' && (m.electricRecorded === false || m.waterRecorded === false) ? (
+                            {m.status !== 'Đã xác nhận' && (m.electricRecorded === false || m.waterRecorded === false) ? (
                               <button
                                 onClick={() => handleContinueDraftReading(m)}
                                 className={`px-2.5 py-1 rounded text-[11px] font-medium cursor-pointer ${m.pendingVerificationFlag ? 'bg-red-50 hover:bg-red-100 text-red-800' : 'bg-blue-50 hover:bg-blue-100 text-blue-700'}`}
@@ -615,7 +693,7 @@ export const BillingView: React.FC<BillingViewProps> = ({ onNavigateToNotices })
                                   setEditFinalElec(m.finalElectricKwh);
                                   setEditFinalWater(m.finalWaterM3);
                                   setEditReason('');
-                                  setEditProof(m.abnormalEvidence || '');
+                                  setEditProof(m.abnormalEvidence || '');setEditEvidenceFiles(m.evidenceFiles || []);
                                   setEditVerifiedElec(m.verifiedElectricKwh ?? '');
                                   setEditVerifiedWater(m.verifiedWaterM3 ?? '');
                                   setEditVerificationAccepted(false);
@@ -993,46 +1071,12 @@ export const BillingView: React.FC<BillingViewProps> = ({ onNavigateToNotices })
             {readingSavePhase === 'entry' && <label className="flex gap-2 items-center text-xs text-slate-600">
               <input type="checkbox" checked={isAbnormal} onChange={e=>setIsAbnormal(e.target.checked)}/> Khai báo sự cố công tơ (nếu có)
             </label>}
-            {(readingSavePhase === 'warning' || readingSavePhase === 'details') && <div className="p-4 border border-amber-300 rounded-xl bg-amber-50 space-y-3">
-              <div className="font-bold text-amber-900 flex items-center gap-2"><AlertTriangle className="w-4 h-4"/> Cảnh báo chỉ số bất thường</div>
-              <p>Hệ thống phát hiện {autoElecAbnormal ? 'điện' : ''}{autoElecAbnormal && autoWaterAbnormal ? ' và ' : ''}{autoWaterAbnormal ? 'nước' : ''} có mức tiêu thụ bất thường hoặc công tơ có sự cố. Kiểm tra trước khi tiếp tục.</p>
-              {readingSavePhase==='warning' ? <div className="flex justify-end gap-2">
-                <button type="button" onClick={()=>{setReadingSavePhase('entry');setReadingDateError(null);}} className="px-3 py-2 bg-white border rounded-lg">Quay lại nhập</button>
-                <button type="button" onClick={()=>{setReadingSavePhase('details');setReadingDateError(null);}} className="px-3 py-2 bg-amber-600 text-white rounded-lg">Tiếp tục</button>
-              </div> : <div className="space-y-3">
-                <label className="block font-semibold">Lý do bất thường <span className="text-red-500">*</span>
-                  <select value={abnormalReason} onChange={e=>setAbnormalReason(e.target.value as any)} className="block w-full mt-1 p-2 border rounded-lg bg-white">
-                    <option value="Khác">Tiêu thụ cao/thấp bất thường hoặc lý do khác</option>
-                    <option value="Nhập sai">Chỉ số kỳ trước nhập sai</option>
-                    <option value="Quay vòng">Công tơ quay vòng</option><option value="Thay công tơ">Thay công tơ</option><option value="Công tơ hỏng">Công tơ hỏng</option>
-                  </select>
-                </label>
-                <label className="block font-semibold">Giải thích lý do đã kiểm tra <span className="text-red-500">*</span>
-                  <textarea value={abnormalNotes} onChange={e=>setAbnormalNotes(e.target.value)} rows={2} className="block w-full mt-1 p-2 border rounded-lg" placeholder="Ví dụ: Khách dùng điều hòa nhiều, đã đối chiếu ảnh công tơ"/>
-                </label>
-                {isAbnormal && abnormalReason !== 'Khác' && <label className="block font-semibold">Công tơ có sự cố
-                  <select value={abnormalMeter} onChange={e=>setAbnormalMeter(e.target.value as any)} className="block mt-1 w-full p-2 bg-white border rounded-lg">
-                    <option value="electric">Điện</option><option value="water">Nước</option><option value="both">Cả hai công tơ</option>
-                  </select>
-                </label>}
-                {(structuralElecAbnormal || structuralWaterAbnormal) && <div className="grid grid-cols-2 gap-2">
-                  {structuralElecAbnormal && <label>Sản lượng điện đã xác minh (kWh) *<input type="number" min="0" value={verifiedElec} onChange={e=>setVerifiedElec(e.target.value===''?'':Number(e.target.value))} className="w-full p-2 border rounded-lg"/></label>}
-                  {structuralWaterAbnormal && <label>Sản lượng nước đã xác minh (m³) *<input type="number" min="0" value={verifiedWater} onChange={e=>setVerifiedWater(e.target.value===''?'':Number(e.target.value))} className="w-full p-2 border rounded-lg"/></label>}
-                  <label className="col-span-2">Ảnh/biên bản chứng cứ *<input value={abnormalProof} onChange={e=>setAbnormalProof(e.target.value)} className="w-full p-2 border rounded-lg" placeholder="Tên tệp hoặc link chứng cứ"/></label>
-                </div>}
-                <label className="flex items-center gap-2 font-semibold"><input type="checkbox" checked={verifiedCheckbox} onChange={e=>setVerifiedCheckbox(e.target.checked)}/> Tôi đã kiểm tra và xác nhận dữ liệu đã nhập</label>
-                <div className="flex justify-end gap-2">
-                  <button type="button" onClick={()=>setReadingSavePhase('entry')} className="px-3 py-2 border bg-white rounded-lg">Quay lại nhập</button>
-                  <button type="button" onClick={handleContinueAfterAbnormal} className="px-3 py-2 bg-amber-600 text-white rounded-lg">Tiếp tục</button>
-                </div>
-              </div>}
-            </div>}
             {readingSavePhase === 'partial' && <div className="p-4 rounded-xl bg-blue-50 border border-blue-200 space-y-3">
               <p className="font-bold text-blue-900">Chưa ghi đủ điện và nước. Bạn có muốn lưu dở dữ liệu đã kiểm tra?</p>
               <p>{!hasElectric?'Còn thiếu chỉ số điện.':'Còn thiếu chỉ số nước.'} Bản nháp sẽ được mở lại để bổ sung về sau, chưa được tính tiền.</p>
               <div className="flex justify-end gap-2">
                 <button type="button" onClick={()=>setReadingSavePhase('entry')} className="px-3 py-2 border rounded-lg bg-white">Không – Nhập tiếp</button>
-                <button type="button" onClick={()=>commitReading(isAbnormal||detectedAbnormal)} className="px-3 py-2 rounded-lg bg-blue-600 text-white">Xác nhận lưu dở</button>
+                <button type="button" onClick={()=>commitReading(deferredVerification ? 'pending' : (isAbnormal || detectedAbnormal) ? 'verified' : 'normal')} className="px-3 py-2 rounded-lg bg-blue-600 text-white">Xác nhận lưu dở</button>
               </div>
             </div>}
 
@@ -1068,6 +1112,55 @@ export const BillingView: React.FC<BillingViewProps> = ({ onNavigateToNotices })
 
             
           </div>
+        </div>
+      )}
+
+      {showReadingModal && (readingSavePhase === 'warning' || readingSavePhase === 'details') && (
+        <div role="dialog" aria-modal="true" aria-label="Cảnh báo chỉ số bất thường" className="fixed inset-0 z-[200] flex items-center justify-center bg-slate-900/70 p-4">
+            <div className="bg-white border border-amber-300 rounded-2xl shadow-2xl p-5 max-w-xl w-full max-h-[90vh] overflow-y-auto space-y-3">
+              <div className="font-bold text-amber-900 flex items-center gap-2"><AlertTriangle className="w-4 h-4"/> Cảnh báo chỉ số bất thường</div>
+              <p>Chỉ số {autoElecAbnormal || autoWaterAbnormal ? `${autoElecAbnormal ? 'điện' : ''}${autoElecAbnormal && autoWaterAbnormal ? ' và ' : ''}${autoWaterAbnormal ? 'nước' : ''}` : 'công tơ'} có dấu hiệu bất thường. Bạn có thể quay lại sửa, lưu Nháp để xác minh sau, hoặc xác minh ngay.</p>
+              {readingDateError && <p role="alert" className="rounded-lg bg-red-50 border border-red-200 p-2 text-red-700">{readingDateError}</p>}
+              {readingSavePhase==='warning' ? <div className="flex flex-wrap justify-end gap-2">
+                <button type="button" onClick={()=>{setReadingSavePhase('entry');setReadingDateError(null);}} className="px-3 py-2 bg-white border rounded-lg">Quay lại nhập</button>
+                <button type="button" onClick={handleDeferVerification} className="px-3 py-2 border border-amber-300 bg-amber-50 text-amber-900 font-semibold rounded-lg">Lưu Nháp – Cần xác minh</button>
+                <button type="button" onClick={()=>{setReadingSavePhase('details');setReadingDateError(null);}} className="px-3 py-2 bg-amber-600 text-white rounded-lg">Xác minh ngay</button>
+              </div> : <div className="space-y-3">
+                <label className="block font-semibold">Lý do bất thường <span className="text-red-500">*</span>
+                  <select value={abnormalReason} onChange={e=>setAbnormalReason(e.target.value as any)} className="block w-full mt-1 p-2 border rounded-lg bg-white">
+                    <option value="Khác">Tiêu thụ cao/thấp bất thường hoặc lý do khác</option>
+                    <option value="Nhập sai">Chỉ số kỳ trước nhập sai</option>
+                    <option value="Quay vòng">Công tơ quay vòng</option><option value="Thay công tơ">Thay công tơ</option><option value="Công tơ hỏng">Công tơ hỏng</option>
+                  </select>
+                </label>
+                <label className="block font-semibold">Giải thích lý do đã kiểm tra <span className="text-red-500">*</span>
+                  <textarea value={abnormalNotes} onChange={e=>setAbnormalNotes(e.target.value)} rows={2} className="block w-full mt-1 p-2 border rounded-lg" placeholder="Ví dụ: Khách dùng điều hòa nhiều, đã đối chiếu ảnh công tơ"/>
+                </label>
+                {isAbnormal && abnormalReason !== 'Khác' && <label className="block font-semibold">Công tơ có sự cố
+                  <select value={abnormalMeter} onChange={e=>setAbnormalMeter(e.target.value as any)} className="block mt-1 w-full p-2 bg-white border rounded-lg">
+                    <option value="electric">Điện</option><option value="water">Nước</option><option value="both">Cả hai công tơ</option>
+                  </select>
+                </label>}
+                {(structuralElecAbnormal || structuralWaterAbnormal) && <div className="grid grid-cols-2 gap-2">
+                  {structuralElecAbnormal && <label>Sản lượng điện đã xác minh (kWh) *<input type="number" min="0" value={verifiedElec} onChange={e=>setVerifiedElec(e.target.value===''?'':Number(e.target.value))} className="w-full p-2 border rounded-lg"/></label>}
+                  {structuralWaterAbnormal && <label>Sản lượng nước đã xác minh (m³) *<input type="number" min="0" value={verifiedWater} onChange={e=>setVerifiedWater(e.target.value===''?'':Number(e.target.value))} className="w-full p-2 border rounded-lg"/></label>}
+                  <div className="col-span-2 space-y-1">
+                    <label className="block font-semibold">Tải ảnh/biên bản chứng cứ * (JPG, PNG, WEBP, PDF)</label>
+                    <input type="file" accept="image/jpeg,image/png,image/webp,application/pdf" multiple onChange={e=>{void addEvidence(e.target.files,'entry');e.target.value='';}} className="w-full p-2 border rounded-lg bg-white"/>
+                    {readingEvidenceFiles.map((f,i)=><div key={i} className="flex items-center justify-between gap-2">
+                      <a href={f.dataUrl} download={f.name} className="underline text-blue-700" target="_blank" rel="noreferrer">📎 {f.name}</a>
+                      <button type="button" onClick={()=>setReadingEvidenceFiles(p=>p.filter((_,k)=>k!==i))}>Xóa</button>
+                    </div>)}
+                    <p className="text-[10px] text-slate-500">Tối đa 3 tệp, 900 KB/tệp, tổng 1,8 MB. Tệp lưu cục bộ trong prototype.</p>
+                  </div>
+                </div>}
+                <label className="flex items-center gap-2 font-semibold"><input type="checkbox" checked={verifiedCheckbox} onChange={e=>setVerifiedCheckbox(e.target.checked)}/> Tôi đã kiểm tra và xác nhận dữ liệu đã nhập</label>
+                <div className="flex justify-end gap-2">
+                  <button type="button" onClick={()=>setReadingSavePhase('entry')} className="px-3 py-2 border bg-white rounded-lg">Quay lại nhập</button>
+                  <button type="button" onClick={handleContinueAfterAbnormal} className="px-3 py-2 bg-amber-600 text-white rounded-lg">Tiếp tục</button>
+                </div>
+              </div>}
+            </div>
         </div>
       )}
 
@@ -1120,7 +1213,16 @@ export const BillingView: React.FC<BillingViewProps> = ({ onNavigateToNotices })
                 <p className="font-semibold text-amber-900">Chỉ số cần xác minh: nhập lý do và tích xác nhận trước khi lưu.</p>
                 {editFinalElec < selectedReading.initialElectricKwh && <label className="block">Sản lượng điện thực tế đã xác minh (kWh) *<input type="number" min="0" value={editVerifiedElec} onChange={e=>setEditVerifiedElec(e.target.value===''?'':Number(e.target.value))} className="w-full p-2 border rounded-lg"/></label>}
                 {editFinalWater < selectedReading.initialWaterM3 && <label className="block">Sản lượng nước thực tế đã xác minh (m³) *<input type="number" min="0" value={editVerifiedWater} onChange={e=>setEditVerifiedWater(e.target.value===''?'':Number(e.target.value))} className="w-full p-2 border rounded-lg"/></label>}
-                <label className="block">Chứng cứ xác minh (khi công tơ sai/quay vòng/thay) <input value={editProof} onChange={e=>setEditProof(e.target.value)} className="w-full p-2 border rounded-lg"/></label>
+                <div className="space-y-1">
+                  <label className="block font-semibold">Tải ảnh hoặc biên bản xác minh</label>
+                  <input type="file" accept="image/jpeg,image/png,image/webp,application/pdf" multiple onChange={e=>{void addEvidence(e.target.files,'edit');e.target.value='';}} className="w-full p-2 border rounded-lg bg-white"/>
+                  {editEvidenceFiles.map((f,i)=><div key={i} className="flex justify-between items-center gap-2">
+                    <a href={f.dataUrl} download={f.name} target="_blank" rel="noreferrer" className="text-blue-700 underline">📎 {f.name}</a>
+                    <button type="button" onClick={()=>setEditEvidenceFiles(p=>p.filter((_,k)=>k!==i))}>Xóa</button>
+                  </div>)}
+                  {editProof && <p className="text-[10px] text-slate-500">Ghi chú chứng cứ cũ: {editProof}</p>}
+                  <p className="text-[10px] text-slate-500">JPG/PNG/WEBP/PDF. Tối đa 3 tệp, tổng 1,8 MB (lưu trong trình duyệt).</p>
+                </div>
                 <label className="flex gap-2 items-center"><input type="checkbox" checked={editVerificationAccepted} onChange={e=>setEditVerificationAccepted(e.target.checked)}/> Tôi đã kiểm tra và xác nhận chỉ số điều chỉnh</label>
               </div>}
 
@@ -1145,9 +1247,15 @@ export const BillingView: React.FC<BillingViewProps> = ({ onNavigateToNotices })
                 className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl font-medium cursor-pointer"
               >
                 Hủy </button>
+              {(selectedReading.pendingVerificationFlag || editFinalElec < selectedReading.initialElectricKwh || editFinalWater < selectedReading.initialWaterM3 ||
+                editFinalElec - selectedReading.initialElectricKwh > 450 || editFinalWater - selectedReading.initialWaterM3 > 30 ||
+                editFinalElec === selectedReading.initialElectricKwh || editFinalWater === selectedReading.initialWaterM3) &&
+                <button type="button" onClick={e=>handleUpdateReading(e,true)} className="px-3 py-2 border border-amber-300 bg-amber-50 text-amber-900 font-semibold rounded-lg">
+                  Lưu Nháp – Cần xác minh
+                </button>}
               <button
                 type="button"
-                onClick={handleUpdateReading}
+                onClick={e=>handleUpdateReading(e)}
                 className="px-5 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-xl font-bold cursor-pointer shadow-xs"
               >
                 Lưu sửa chỉ số </button>
