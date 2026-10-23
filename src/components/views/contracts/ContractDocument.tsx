@@ -26,7 +26,7 @@ export const ContractDocument: React.FC<Props> = ({ contract, tenant, room }) =>
   const phone = contract.tenantPhone || tenant?.phoneNumber || '';
   const isDraft = ['Nháp', 'Chờ khách ký'].includes(contract.status) || !contract.isSignedPaper;
   return (
-    <article className="contract-print-page bg-white text-slate-950 border border-slate-200 shadow-sm rounded-md mx-auto w-full max-w-[210mm] p-4 sm:p-6 lg:p-8 font-serif text-[13px] sm:text-[14px] leading-[1.75] break-words" aria-label={`Bản hợp đồng thuê phòng ${contract.id}`}>
+    <article className="contract-print-page contract-vietnamese-text bg-white text-slate-950 border border-slate-200 shadow-sm rounded-md mx-auto w-full max-w-[210mm] p-4 sm:p-6 lg:p-8 text-[13px] sm:text-[14px] leading-[1.75] break-words" lang="vi" aria-label={`Bản hợp đồng thuê phòng ${contract.id}`}>
       <div className="text-center leading-relaxed mb-5">
         <div className="font-bold text-[13px] sm:text-[15px] uppercase tracking-[.025em]">CỘNG HÒA XÃ HỘI CHỦ NGHĨA VIỆT NAM</div>
         <div className="font-bold text-[13px] sm:text-[14px]">Độc lập - Tự do - Hạnh phúc</div>
@@ -100,11 +100,11 @@ export const ContractDocument: React.FC<Props> = ({ contract, tenant, room }) =>
         <p>Hợp đồng và các phụ lục, biên bản (nếu có) cần được đối chiếu với bản giấy do các bên ký. Việc hiển thị thông tin trên website không thay thế bản gốc có chữ ký.</p>
       </section>
 
-      <div className="grid grid-cols-2 gap-3 sm:gap-8 mt-8 text-center font-sans text-xs sm:text-sm break-inside-avoid">
+      <div className="grid grid-cols-2 gap-3 sm:gap-8 mt-8 text-center text-xs sm:text-sm break-inside-avoid">
         <div><strong className="block uppercase">BÊN CHO THUÊ (BÊN A)</strong><span className="italic text-slate-600">(Ký và ghi rõ họ tên)</span><div className="h-20" /><strong>{contract.lessorName || ''}</strong></div>
         <div><strong className="block uppercase">BÊN THUÊ (BÊN B)</strong><span className="italic text-slate-600">(Ký và ghi rõ họ tên)</span><div className="h-20" /><strong>{contract.tenantName || tenant?.fullName || ''}</strong></div>
       </div>
-      <div className="contract-document-warning mt-5 border-t border-slate-200 pt-3 text-[11px] font-sans text-slate-600 italic">
+      <div className="contract-document-warning mt-5 border-t border-slate-200 pt-3 text-[11px] text-slate-600 italic">
         Bản trình bày được tạo từ dữ liệu hệ thống, không phải bản scan hay bản sao chứng thực hợp đồng đã ký. Các chỗ để trống không được tự suy diễn từ tài khoản quản lý hoặc tài khoản nhận tiền.
       </div>
     </article>

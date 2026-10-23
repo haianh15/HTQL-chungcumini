@@ -28,6 +28,13 @@
 }
 
 
+/* Phần nội dung hợp đồng luôn dùng một font hỗ trợ đầy đủ dấu tiếng Việt.
+   Áp dụng chung cho xem chi tiết, cửa sổ khổ lớn và bản in/PDF. */
+.contract-vietnamese-text {
+  font-family: 'Noto Serif', 'Times New Roman', 'DejaVu Serif', serif;
+  font-kerning: normal;
+}
+
 /* In/Lưu PDF: chỉ in bản hợp đồng đang được xem; không in menu và nút nghiệp vụ. */
 @media print {
   @page { size: A4 portrait; margin: 15mm 13mm; }
