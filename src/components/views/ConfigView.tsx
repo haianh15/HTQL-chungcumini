@@ -1,6 +1,4 @@
 import React, { useState } from 'react';
-import { validateBusinessBackup } from '../../utils/backupValidation';
-import { commitBusinessStorage } from '../../utils/businessStorage';
 import { useApp } from '../../context/AppContext';
 import { ServiceFeeConfig } from '../../types';
 import { Settings, Landmark, Zap, Droplets, Plus, Save, RotateCcw, AlertTriangle, History, CheckCircle2 } from 'lucide-react';
@@ -19,54 +17,6 @@ export const ConfigView: React.FC<ConfigViewProps> = ({ onNavigateToNotices }) =
     updateBankAccount,
     paymentNotices
   } = useApp();
-
-  // Sao lưu dữ liệu nghiệp vụ trên trình duyệt trước khi chuyển sang cơ sở dữ liệu tập trung.
-  const exportLocalBusinessData = () => {
-    const records: Record<string, unknown> = {};
-    for (let i = 0; i < localStorage.length; i++) {
-      const key = localStorage.key(i);
-      if (!key || !key.startsWith('mini_apt_') ||
-          /auth|owner|session|password|securityLogs/i.test(key)) continue;
-      const value = localStorage.getItem(key);
-      if (!value) continue;
-      try { records[key] = JSON.parse(value); } catch { /* Bỏ giá trị lỗi định dạng. */ }
-    }
-    const payload = JSON.stringify({schema:'ccmn-business-backup-v1',exportedAt:new Date().toISOString(),records}, null, 2);
-    const link = document.createElement('a');
-    const url = URL.createObjectURL(new Blob([payload], {type:'application/json'}));
-    link.href = url;
-    link.download = `ccmn-du-lieu-${new Date().toISOString().slice(0,10)}.json`;
-    link.click();
-    URL.revokeObjectURL(url);
-  };
-
-  const [restoreError, setRestoreError] = useState<string | null>(null);
-  // Khôi phục thủ công từ file của chính người dùng; không tự nhập dữ liệu ở máy khác.
-  const restoreLocalBusinessData = async (event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    event.target.value = '';
-    if (!file) return;
-    setRestoreError(null);
-    if (file.size > 10 * 1024 * 1024 || !file.name.toLowerCase().endsWith('.json')) {
-      setRestoreError('Chỉ nhận tệp JSON sao lưu tối đa 10 MB.');
-      return;
-    }
-    try {
-      const backup: unknown = JSON.parse(await file.text());
-      const problems = validateBusinessBackup(backup);
-      if (problems.length) throw new Error(`Từ chối khôi phục vì dữ liệu không hợp lệ:\n${problems.join('\n')}`);
-      const entries = Object.entries((backup as {records: Record<string,unknown>}).records);
-      if (!window.confirm(`Đã kiểm tra ${entries.length} nhóm dữ liệu. Tạo tệp sao lưu hiện tại trước khi khôi phục? Dữ liệu của máy này sẽ bị thay thế nếu bạn tiếp tục.`)) return;
-      // Emergency snapshot is downloaded before the destructive write; the user can keep it offline.
-      exportLocalBusinessData();
-      if (!window.confirm('Đã tải tệp sao lưu hiện tại? Xác nhận khôi phục bản JSON mới và tải lại ứng dụng.')) return;
-      const result = commitBusinessStorage(Object.fromEntries(entries), localStorage);
-      if (!result.success) throw new Error(result.message);
-      window.location.reload();
-    } catch (error) {
-      setRestoreError(error instanceof Error ? error.message : 'Không thể đọc hoặc khôi phục bản sao lưu.');
-    }
-  };
 
   const currentPrice = priceHistory[0];
 
@@ -172,23 +122,6 @@ export const ConfigView: React.FC<ConfigViewProps> = ({ onNavigateToNotices }) =
           </div>
         </div>
       </div>
-
-      {/* Sao lưu thủ công trước khi chuyển sang máy khác hoặc kết nối CSDL. */}
-      <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-        <div>
-          <h2 className="text-sm font-bold text-amber-950">Sao lưu dữ liệu nghiệp vụ trên máy này</h2>
-          <p className="text-xs text-amber-900 mt-1">Dữ liệu vẫn đang lưu trong trình duyệt, chưa đồng bộ nhiều máy. File sao lưu có thể chứa thông tin khách thuê, cần bảo quản riêng tư.</p>
-        </div>
-        <div className="flex flex-col gap-2 shrink-0">
-          <button type="button" onClick={exportLocalBusinessData}
-            className="px-4 py-2 rounded-lg bg-amber-800 text-white text-sm font-semibold hover:bg-amber-900">Tải bản sao lưu JSON</button>
-          <label className="px-4 py-2 rounded-lg bg-white border border-amber-700 text-amber-900 text-sm font-semibold text-center cursor-pointer">
-            Khôi phục từ bản sao lưu JSON
-            <input type="file" accept="application/json,.json" className="sr-only" onChange={restoreLocalBusinessData} />
-          </label>
-        </div>
-      </div>
-      {restoreError && <div role="alert" className="p-3 border border-red-300 bg-red-50 rounded-lg text-red-800 text-xs whitespace-pre-wrap">{restoreError}</div>}
 
       {/* Grid of Configurations */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
